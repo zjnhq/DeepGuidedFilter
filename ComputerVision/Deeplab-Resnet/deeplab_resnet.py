@@ -1,8 +1,9 @@
+import torch
 import torch.nn as nn
 
 from torch.nn import functional as F
 from guided_filter_pytorch.guided_filter import GuidedFilter
-
+from pdb import set_trace
 AFFINE = True
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -197,7 +198,90 @@ class MS_Deeplab(nn.Module):
 
         return output
 
+class ConvSplitTree2(nn.Module):
+    def __init__(self, tree_depth, in_channels, out_channels= 2, kernel_size=3, stride=1, pad=1, dilation=1, guide_in_channels =1):
+        super(ConvSplitTree2, self).__init__()
+        if tree_depth>6:
+            tree_depth = 6
+        self.tree_depth = tree_depth
+        # self.numLeaves = int(2**self.tree_depth)
+        self.sum_out_channels = int(self.tree_depth * out_channels)
+        self.convSplit = nn.Conv2d(guide_in_channels, self.sum_out_channels, kernel_size=1, stride=stride, padding=0, bias=False).type(torch.FloatTensor)
+        nn.init.uniform_(self.convSplit.weight)
+        self.out_channels = out_channels
+        self.convPred = nn.Conv2d(in_channels, self.sum_out_channels, kernel_size, stride=stride, padding=pad, dilation=dilation, bias=True).type(torch.FloatTensor)
+        nn.init.uniform_(self.convPred.weight)
+        self.normalize_weight_iter = True
+        self.kernel_size = kernel_size
+        # self.maxpool = nn.MaxPool1d()
+
+    def forward(self,x, data):
+        if self.normalize_weight_iter:
+            self.convSplit.weight.requires_grad = False
+            self.convSplit.weight[self.convSplit.weight<0] *=0.0
+            for i in range(self.tree_depth):
+                normalizer = torch.sum(self.convSplit.weight[i])
+                if normalizer< 0.1:
+                    self.convSplit.weight[i] += 0.1 / self.kernel_size / self.kernel_size
+                    normalizer =torch.sum(self.convSplit.weight[i]) 
+                self.convSplit.weight[i] / normalizer
+            self.convSplit.weight.requires_grad = True
+        
+        splitWeight =self.convSplit(x).view(x.shape[0],self.tree_depth,self.out_channels,x.shape[2],x.shape[3])
+        splitWeight = F.softmax(splitWeight, dim=1)
+        # .view(x.shape[0],self.sum_out_channels,x.shape[2],x.shape[3])
+        data = self.convPred(data).view(x.shape[0],self.tree_depth,self.out_channels,x.shape[2],x.shape[3])
+        maxweight, index = torch.max(splitWeight, dim=1)
+        index = index.view(x.shape[0],1,self.out_channels*x.shape[2]*x.shape[3]).transpose(1,2)
+        data = data* splitWeight
+        data.view(x.shape[0],self.tree_depth,self.out_channels*x.shape[2]*x.shape[3]).transpose(1,2)
+        selected_data= torch.index_select(data,2,index.view(x.shape[0]*self.out_channels*x.shape[2]*x.shape[3]))
+        # mask= splitWeight==maxweight
+        # if torch.sum(mask) !=x.shape[0]*self.out_channels*x.shape[2]*x.shape[3]:
+        #     print("here some softmax value =0.5, adding some noise into it")
+        #     splitWeight[:,0] +=0.001 
+        #     splitWeight[:,1] -=0.001
+        #     mask= splitWeight>0.5
+        # set_trace()
+        # selected_data = torch.masked_select(data,mask).view(x.shape[0],self.tree_depth,self.out_channels,x.shape[2],x.shape[3])
+        y=torch.prod(selected_data,dim=1)
+        set_trace()
+        # _, index = torch.max(splitWeight,dim = 2)
+        # y= data[index].view(x.shape[0],self.tree_depth,x.shape[2],x.shape[3])
+        
+        # y = torch.pow(y,1.0/self.tree_depth)
+        return y
+
+class CST_Deeplab(nn.Module):
+    def __init__(self, block, NoLabels, dgf,guide_in_channels):
+        super(CST_Deeplab, self).__init__()
+        self.Scale = ResNet(block, [3, 4, 23, 3], NoLabels)  # changed to fix #4
+
+        # DGF
+        self.dgf = dgf
+
+        if self.dgf:
+            self.guided_map_conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1)
+            self.guided_map_relu1 = nn.ReLU(inplace=True)
+            self.guided_map_conv2 = nn.Conv2d(64, 16, kernel_size=1)
+            self.guided_map_relu2 = nn.ReLU(inplace=True)
+
+            self.cst = ConvSplitTree2(3, NoLabels, out_channels=NoLabels, guide_in_channels = guide_in_channels)
+
+    def forward(self, x, im=None):
+        output = self.Scale(x)
+
+        if self.dgf:
+            g = self.guided_map_relu1(self.guided_map_conv1(im))
+            g = self.guided_map_conv2(g)
+
+            output = F.interpolate(output, im.size()[2:], mode='bilinear', align_corners=True)
+
+            output = self.cst(g, output)
+
+        return output
 
 def Res_Deeplab(NoLabels=21, dgf=False, dgf_r=4, dgf_eps=1e-2):
-    model = MS_Deeplab(Bottleneck, NoLabels, dgf, dgf_r, dgf_eps)
+    # model = MS_Deeplab(Bottleneck, NoLabels, dgf, dgf_r, dgf_eps)
+    model = CST_Deeplab(Bottleneck, NoLabels, dgf=True, guide_in_channels= 16)
     return model

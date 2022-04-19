@@ -14,6 +14,8 @@ from torch.autograd import Variable
 
 import deeplab_resnet
 
+from pdb import *
+
 docstr = """Train ResNet-DeepLab on VOC12 (scenes) in pytorch using MSCOCO pretrained initialization 
 
 Usage: 
@@ -74,8 +76,10 @@ def scale_im(img_temp, scale):
 def get_data_from_chunk_v2(args, chunk):
     assert len(chunk) == 1
 
-    gt_path = args['--GTpath']
-    img_path = args['--IMpath']
+    # gt_path = args['--GTpath']
+    # img_path = args['--IMpath']
+    gt_path = 'F:/data/detection/VOCdevkit/VOC2012/SegmentationClass_1D'
+    img_path = 'F:/data/detection/VOCdevkit/VOC2012/JPEGImages'
 
     scale = random.uniform(0.5, 1.3)
     flip_p = random.uniform(0, 1)
