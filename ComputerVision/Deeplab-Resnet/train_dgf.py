@@ -27,7 +27,7 @@ Options:
     --IMpath=<str>              Sketch images path prefix [default: data/img/]
     --NoLabels=<int>            The number of different labels in training data, VOC has 21 labels, including background [default: 21]
     --LISTpath=<str>            Input image number list file [default: data/list/train_aug.txt]
-    --lr=<float>                Learning Rate [default: 0.00025]
+    --lr=<float>                Learning Rate [default: 0.00001]
     -i, --iterSize=<int>        Num iters to accumulate gradients over [default: 10]
     --wtDecay=<float>           Weight decay during training [default: 0.0005]
     --gpu0=<int>                GPU number [default: 0]
@@ -164,6 +164,13 @@ def get_10x_lr_params(args, model):
     if args['--dgf']:
         b.append(model.guided_map_conv1.parameters())
         b.append(model.guided_map_conv2.parameters())
+        b.append(model.guided_map_conv3.parameters())
+        b.append(model.cst2.parameters())
+        b.append(model.cst3.parameters())
+        b.append(model.cst4.parameters())
+        b.append(model.cst5.parameters())
+        b.append(model.guided_map_conv5.parameters())
+        b.append(model.guided_filter.parameters())
 
     for j in range(len(b)):
         for i in b[j]:
@@ -183,7 +190,8 @@ def main():
     if not os.path.exists('data/' + args['--snapshots']):
         os.makedirs('data/' + args['--snapshots'])
 
-    model = deeplab_resnet.Res_Deeplab(int(args['--NoLabels']), args['--dgf'], 4, 1e-2)
+    # model = deeplab_resnet.Res_Deeplab(int(args['--NoLabels']), args['--dgf'], 4, 1e-2)
+    model = deeplab_resnet.Cst_Deeplab(int(args['--NoLabels']), args['--dgf'], 4, 1e-2)
 
     if args['--ft']:
         saved_state_dict = torch.load(args['--ft_model_path'])
@@ -196,7 +204,7 @@ def main():
     model.float().eval().cuda(gpu0)
 
     optimizer = optim.SGD([{'params': get_1x_lr_params_NOscale(model), 'lr': base_lr},
-                           {'params': get_10x_lr_params(args, model), 'lr': 10 * base_lr}], lr=base_lr, momentum=0.9,
+                           {'params': get_10x_lr_params(args, model), 'lr': 20 * base_lr}], lr=base_lr, momentum=0.9,
                           weight_decay=weight_decay)
     optimizer.zero_grad()
 
@@ -208,26 +216,30 @@ def main():
         data_list.extend(img_list)
     data_gen = chunker(data_list, 1)
 
+    accu_loss = 0.0
+    ave_loss_batchsz = 20
     for iter in range(max_iter + 1):
         inputs, label = get_data_from_chunk_v2(args, next(data_gen))
         inputs = [Variable(input).cuda(gpu0) for input in inputs]
-
         loss = loss_calc(model(*inputs), label, gpu0) / iter_size
         loss.backward()
 
-        if iter % 1 == 0:
-            print('iter = ', iter, 'of', max_iter, 'completed, loss = ', iter_size * (loss.data.cpu().numpy()))
+        if iter % ave_loss_batchsz == 0:
+            print('iter = ', iter, 'of', max_iter, 'completed, loss = ', accu_loss/ave_loss_batchsz) #iter_size * (loss.data.cpu().numpy()))
+            accu_loss = 0.0
+
+        accu_loss += loss.item()
 
         if iter % iter_size == 0:
             optimizer.step()
             lr_ = lr_poly(base_lr, iter, max_iter, 0.9)
-            print('(poly lr policy) learning rate', lr_)
+            # print('(poly lr policy) learning rate', lr_)
             optimizer = optim.SGD([{'params': get_1x_lr_params_NOscale(model), 'lr': lr_},
-                                   {'params': get_10x_lr_params(args, model), 'lr': 10 * lr_}],
+                                   {'params': get_10x_lr_params(args, model), 'lr': 50 * lr_}],
                                   lr=lr_, momentum=0.9, weight_decay=weight_decay)
             optimizer.zero_grad()
 
-        if iter % 1000 == 0 and iter != 0:
+        if iter % 500 == 0 and iter != 0:
             print('taking snapshot ...')
             torch.save(model.state_dict(), 'data/' + args['--snapshots'] + '/VOC12_scenes_' + str(iter) + '.pth')
 

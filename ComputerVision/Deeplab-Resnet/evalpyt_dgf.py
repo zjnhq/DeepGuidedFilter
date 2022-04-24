@@ -42,10 +42,13 @@ def main():
     print(args)
 
     gpu0 = int(args['--gpu0'])
-    im_path = args['--testIMpath']
-    gt_path = args['--testGTpath']
+    # im_path = args['--testIMpath']
+    # gt_path = args['--testGTpath']
+    gt_path = 'F:/data/detection/VOCdevkit/VOC2012/SegmentationClass_1D'
+    im_path = 'F:/data/detection/VOCdevkit/VOC2012/JPEGImages'
 
     model = deeplab_resnet.Res_Deeplab(int(args['--NoLabels']), args['--dgf'], 4, 1e-2)
+    # model = deeplab_resnet.Cst_Deeplab(int(args['--NoLabels']), args['--dgf'], 4, 1e-2)
     model.eval().cuda(gpu0)
 
     img_list = open('data/list/val.txt').readlines()
@@ -59,7 +62,6 @@ def main():
     max_label = int(args['--NoLabels']) - 1  # labels from 0,1, ... 20(for VOC)
     hist = np.zeros((max_label + 1, max_label + 1))
     for idx, i in enumerate(img_list):
-        print('{}/{} ...'.format(idx + 1, len(img_list)))
 
         img = cv2.imread(os.path.join(im_path, i[:-1] + '.jpg')).astype(float)
         img_original = img.copy() / 255.0
@@ -88,6 +90,11 @@ def main():
 
         gt = cv2.imread(os.path.join(gt_path, i[:-1] + '.png'), 0)
         hist += fast_hist(gt.flatten(), output.flatten(), max_label + 1)
+        if (idx+1) %20==0:
+            print('{}/{} ...'.format(idx + 1, len(img_list)))
+        if (idx+1) %100==0:
+            miou = np.diag(hist) / (hist.sum(1) + hist.sum(0) - np.diag(hist))
+            print("Mean iou = ", np.sum(miou) / len(miou))
 
     miou = np.diag(hist) / (hist.sum(1) + hist.sum(0) - np.diag(hist))
     print("Mean iou = ", np.sum(miou) / len(miou))
