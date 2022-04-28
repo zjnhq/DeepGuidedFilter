@@ -77,7 +77,7 @@ class ConvSplitTree(nn.Module):
         return y
 
 class ConvSplitTree2(nn.Module):
-    def __init__(self, tree_depth, in_channels, out_channels= 2, kernel_size=3, stride=1, pad=1, dilation=0, guide_in_channels =1, n_split=2):
+    def __init__(self, tree_depth, in_channels, out_channels= 2, kernel_size=3, stride=1, pad=1, dilation=1, guide_in_channels =1, n_split=2):
         super(ConvSplitTree2, self).__init__()
         if tree_depth>6:
             tree_depth = 6
@@ -95,6 +95,7 @@ class ConvSplitTree2(nn.Module):
         self.kernel_size = kernel_size
         # self.maxpool = nn.MaxPool1d()
         self.resize_small = 1
+        self.softmax_weight = 2.0
 
     def forward_obsolete(self,x, data):
         if self.normalize_weight_iter:
@@ -141,6 +142,12 @@ class ConvSplitTree2(nn.Module):
         # y = torch.pow(y,1.0/self.tree_depth)
         return y
 
+    def set_eval(self, eval_= True):
+        if eval_:
+            self.softmax_weight = 1.0
+        else:
+            self.softmax_weight = 0.2
+
     def forward(self,x, data):
         if x.shape[2]< data.shape[2]:
             if self.resize_small ==1:
@@ -157,6 +164,7 @@ class ConvSplitTree2(nn.Module):
         score =self.convSplit(x).view(x.shape[0],self.tree_depth,self.n_split, self.out_channels,x.shape[2],x.shape[3])
         data = self.convPred(data).view(x.shape[0],self.tree_depth,self.n_split,self.out_channels,x.shape[2],x.shape[3])
         score = F.softmax(score, dim=2)
+        score = score * self.softmax_weight
         data = torch.sum(torch.sum(score * data, dim=2),dim=1)
         # score = F.sigmoid(score)
         final_score,_ = torch.max(score, dim=2)
@@ -224,10 +232,79 @@ class CST_Net(nn.Module):
         self.conv2 = nn.Conv2d(32, 32, 3, 1)
         self.conv3 = nn.Conv2d(32, 32, 3, 1)
         self.conv4 = nn.Conv2d(32, 64, 3, 1)
-        self.dropout1 = nn.Dropout(0.25)
-        self.dropout2 = nn.Dropout(0.5)
+        # self.dropout1 = nn.Dropout(0.25)
+        # self.dropout2 = nn.Dropout(0.5)
         self.cst = ConvSplitTree2(tree_depth=3, in_channels=64, out_channels= 10, guide_in_channels = 32)
         self.cst2 = ConvSplitTree2(tree_depth=3, in_channels=32, out_channels= 10, guide_in_channels = 64)
+        # self.fc1 = nn.Linear(9216, 128)
+        # self.fc2 = nn.Linear(128, 10)
+
+    def set_eval(self, eval_):
+        self.cst.set_eval(eval_)
+        self.cst2.set_eval(eval_)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(x)
+        x = self.conv2(x)
+        x = F.relu(x)
+        x2 = F.max_pool2d(x, 2)
+        x2 = self.conv3(x2)
+        x2 = F.relu(x2)
+        x2 = self.conv4(x2)
+        x2 = F.relu(x2)
+        y = self.cst(x,x2)
+        y += self.cst2(x2,x)*0.5
+        y= torch.mean(torch.mean(y, dim = 3),dim=2)
+
+        output = F.log_softmax(y, dim=1)
+        return output
+
+def get_1x_lr_params_NOscale(model):
+    """
+    This generator returns all the parameters of the net except for
+    the last classification layer. Note that for each batchnorm layer,
+    requires_grad is set to False in deeplab_resnet.py, therefore this function does not return
+    any batchnorm parameter
+    """
+    b = []
+    b.append(model.conv1)
+    b.append(model.conv2)
+    b.append(model.conv3)
+    b.append(model.conv4)
+
+    for i in range(len(b)):
+        for j in b[i].modules():
+            for k in j.parameters():
+                if k.requires_grad:
+                    yield k
+
+
+def get_10x_lr_params(args, model):
+    """
+    This generator returns all the parameters for the last layer of the net,
+    which does the classification of pixel into classes
+    """
+    b = []
+    b.append(model.cst.parameters())
+    b.append(model.cst2.parameters())
+
+
+    for j in range(len(b)):
+        for i in b[j]:
+            yield i
+
+
+class ConvNet(nn.Module):
+    def __init__(self):
+        super(ConvNet, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3, 1)
+        self.conv2 = nn.Conv2d(32, 32, 3, 1)
+        self.conv3 = nn.Conv2d(32, 32, 3, 1)
+        self.conv4 = nn.Conv2d(32, 64, 3, 1)
+        self.conv5 = nn.Conv2d(64, 10, 3, 1)
+        # self.cst = ConvSplitTree2(tree_depth=3, in_channels=64, out_channels= 10, guide_in_channels = 32)
+        # self.cst2 = ConvSplitTree2(tree_depth=3, in_channels=32, out_channels= 10, guide_in_channels = 64)
         # self.fc1 = nn.Linear(9216, 128)
         # self.fc2 = nn.Linear(128, 10)
 
@@ -241,20 +318,12 @@ class CST_Net(nn.Module):
         x2 = F.relu(x2)
         x2 = self.conv4(x2)
         x2 = F.relu(x2)
-        # x = self.dropout1(x)
-        # set_trace()
-        y = self.cst(x,x2)
-        # set_trace()
-        y += self.cst2(x2,x)*0.5
-        # set_trace()
+        y = self.conv5(x2)
         y= torch.mean(torch.mean(y, dim = 3),dim=2)
-        # x = torch.flatten(x, 1)
-        # x = self.fc1(x)
-        # x = F.relu(x)
-        # x = self.dropout2(x)
-        # x = self.fc2(x)
+
         output = F.log_softmax(y, dim=1)
         return output
+
 
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
@@ -263,7 +332,10 @@ def train(args, model, device, train_loader, optimizer, epoch):
         optimizer.zero_grad()
         output = model(data)
         loss = F.nll_loss(output, target)
+        # set_trace()
         loss.backward()
+        model.cst.convSplit.weight.grad = model.cst.convSplit.weight.grad*10.0
+        model.cst2.convSplit.weight.grad = model.cst2.convSplit.weight.grad*10.0
         optimizer.step()
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
@@ -291,13 +363,73 @@ def test(model, device, test_loader):
         test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
 
+def test_attack(model, device, test_loader):
+    # model.eval()
+    test_loss = 0
+    test_loss_attack = 0
+    correct = 0
+    correct_attack = 0
+    use_attack_ = True
+    attack_maxstepsize = 0.1
+    # with torch.no_grad():
+    for batch_idx, (data, target) in enumerate(test_loader):
+        # if batch_idx %10==0:print(batch_idx)
+        data, target = data.to(device), target.to(device)
+        output = model(data) 
+        test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
+        pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+        correct += pred.eq(target.view_as(pred)).sum().item()
+
+        if use_attack_:
+            data_original = data.clone().detach()
+            data.requires_grad = True
+            data.retain_grad()
+            output = model(data)   
+
+            input_upper_limit= (data_original + attack_maxstepsize).detach()
+            input_lower_limit = (data_original - attack_maxstepsize).detach()
+            steps = min(int(attack_maxstepsize/0.001),8)
+            attack_stepsize = attack_maxstepsize/steps
+            # attack_stepsize = 100000.0
+            
+            for attack_iter in range(steps):
+                loss = F.nll_loss(output, target)
+                loss.backward()
+                # input.abs().mean()/(input.grad.abs().mean())
+                data.detach()
+                data.data = data.data + data.grad.sign() * attack_stepsize
+                data.data[data.data>input_upper_limit] = input_upper_limit.data[data.data>input_upper_limit]
+                data.data[data.data<input_lower_limit] = input_lower_limit.data[data.data<input_lower_limit]
+                data.requires_grad= True
+                data.retain_grad()
+                output = model(data)    
+
+            del data_original, input_upper_limit, input_lower_limit
+            test_loss_attack += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
+            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+            correct_attack += pred.eq(target.view_as(pred)).sum().item()
+            del data, output, target
+
+    test_loss /= len(test_loader.dataset)
+
+    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+        test_loss, correct, len(test_loader.dataset),
+        100. * correct / len(test_loader.dataset)))
+
+    if use_attack_:
+        test_loss_attack /= len(test_loader.dataset)
+        print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+            test_loss_attack, correct_attack, len(test_loader.dataset),
+            100. * correct_attack / len(test_loader.dataset)))
+
+
 
 def main():
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
     parser.add_argument('--batch-size', type=int, default=40, metavar='N',
                         help='input batch size for training (default: 64)')
-    parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
+    parser.add_argument('--test-batch-size', type=int, default=200, metavar='N',
                         help='input batch size for testing (default: 1000)')
     parser.add_argument('--epochs', type=int, default=14, metavar='N',
                         help='number of epochs to train (default: 14)')
@@ -311,7 +443,7 @@ def main():
                         help='quickly check a single pass')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--log-interval', type=int, default=10, metavar='N',
+    parser.add_argument('--log-interval', type=int, default=500, metavar='N',
                         help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=False,
                         help='For Saving the current Model')
@@ -342,14 +474,32 @@ def main():
     train_loader = torch.utils.data.DataLoader(dataset1,**train_kwargs)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
+    print("CST_Net:")
     model = CST_Net().to(device)
+    optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
+
+    args.epochs = 4
+
+    scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+    for epoch in range(1, args.epochs + 1):
+        model.set_eval(False)
+        train(args, model, device, train_loader, optimizer, epoch)
+        model.set_eval(True)
+        test_attack(model, device, test_loader)
+        scheduler.step()
+        # break
+    del model, optimizer, scheduler
+
+    print("ConvNet:")
+    model = ConvNet().to(device)
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
         train(args, model, device, train_loader, optimizer, epoch)
-        test(model, device, test_loader)
+        test_attack(model, device, test_loader)
         scheduler.step()
+        # break
 
     if args.save_model:
         torch.save(model.state_dict(), "mnist_cnn.pt")

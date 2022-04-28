@@ -61,6 +61,7 @@ def main():
 
     max_label = int(args['--NoLabels']) - 1  # labels from 0,1, ... 20(for VOC)
     hist = np.zeros((max_label + 1, max_label + 1))
+    hist_attack = np.zeros((max_label + 1, max_label + 1))
     for idx, i in enumerate(img_list):
 
         img = cv2.imread(os.path.join(im_path, i[:-1] + '.jpg')).astype(float)
@@ -75,12 +76,14 @@ def main():
             inputs = [np.zeros((513, 513, 3))]
             inputs[0][:img.shape[0], :img.shape[1], :] = img
 
-        with torch.no_grad():
-            output = model(*[torch.from_numpy(i[np.newaxis, :].transpose(0, 3, 1, 2)).float().cuda(gpu0) for i in inputs])
+        # with torch.no_grad():
+        data= [torch.from_numpy(i[np.newaxis, :].transpose(0, 3, 1, 2)).float().cuda(gpu0) for i in inputs]
+        output = model(*data)
         if not args['--dgf']:
             interp = nn.Upsample(size=(513, 513), mode='bilinear', align_corners=True)
             output = interp(output)
             output = output[:, :, :img.shape[0], :img.shape[1]]
+
 
         output = output.cpu().data[0].numpy().transpose(1, 2, 0)
         output = np.argmax(output, axis=2)
@@ -95,6 +98,42 @@ def main():
         if (idx+1) %100==0:
             miou = np.diag(hist) / (hist.sum(1) + hist.sum(0) - np.diag(hist))
             print("Mean iou = ", np.sum(miou) / len(miou))
+
+        if use_attack_:
+            data_original = data.clone().detach()
+            data.requires_grad = True
+            data.retain_grad()
+            output = model(data)   
+
+            input_upper_limit= (data_original + attack_maxstepsize).detach()
+            input_lower_limit = (data_original - attack_maxstepsize).detach()
+            steps = min(int(attack_maxstepsize/0.001),8)
+            attack_stepsize = attack_maxstepsize/steps
+            # attack_stepsize = 100000.0
+            
+            for attack_iter in range(steps):
+                loss = F.nll_loss(output, target)
+                loss.backward()
+                # input.abs().mean()/(input.grad.abs().mean())
+                data.detach()
+                data.data = data.data + data.grad.sign() * attack_stepsize
+                data.data[data.data>input_upper_limit] = input_upper_limit.data[data.data>input_upper_limit]
+                data.data[data.data<input_lower_limit] = input_lower_limit.data[data.data<input_lower_limit]
+                data.requires_grad= True
+                data.retain_grad()
+                output = model(data)    
+
+            del data_original, input_upper_limit, input_lower_limit
+            test_loss_attack += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
+            # pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+            # correct_attack += pred.eq(target.view_as(pred)).sum().item()
+            output = output.cpu().data[0].numpy().transpose(1, 2, 0)
+            output = np.argmax(output, axis=2)
+            hist_attack += fast_hist(gt.flatten(), output.flatten(), max_label + 1)
+            del data, output
+            if (idx+1) %100==0:
+            miou_attack = np.diag(hist_attack) / (hist_attack.sum(1) + hist_attack.sum(0) - np.diag(hist_attack))
+            print("Mean iou = ", np.sum(miou_attack) / len(miou_attack))
 
     miou = np.diag(hist) / (hist.sum(1) + hist.sum(0) - np.diag(hist))
     print("Mean iou = ", np.sum(miou) / len(miou))
